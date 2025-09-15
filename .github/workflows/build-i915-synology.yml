@@ -31,6 +31,11 @@ on:
         required: false
         default: ""
         type: string
+      force_empty_symvers:
+        description: Fallback to empty Module.symvers if modules build fails
+        required: false
+        default: false
+        type: boolean
       release_tag:
         description: Optional release tag (default auto-generated)
         required: false
@@ -84,7 +89,6 @@ jobs:
         run: |
           set -euo pipefail
           file /opt/syno/toolchain.tar
-          # Try common formats
           (tar -xf /opt/syno/toolchain.tar -C /opt/syno/toolchain 2>/dev/null) || \
           (xz -dc /opt/syno/toolchain.tar | tar -x -C /opt/syno/toolchain) || \
           (gzip -dc /opt/syno/toolchain.tar | tar -x -C /opt/syno/toolchain)
@@ -109,7 +113,6 @@ jobs:
           fi
           echo "TOOLCHAIN_DIR=$TOOLCHAIN_DIR" | tee -a $GITHUB_OUTPUT
 
-          # Prefer a linux-* directory as kernel dir; otherwise first child
           KERNEL_DIR=$(find /opt/syno/kernel -type d -name 'linux-*' -maxdepth 2 | sort | head -n1)
           if [ -z "$KERNEL_DIR" ]; then
             KERNEL_DIR=$(find /opt/syno/kernel -type d -maxdepth 2 -mindepth 1 | sort | head -n1)
@@ -119,7 +122,6 @@ jobs:
           fi
           echo "KERNEL_DIR=$KERNEL_DIR" | tee -a $GITHUB_OUTPUT
 
-          # Detect cross prefix from toolchain bin/*-gcc
           BIN_DIR="$TOOLCHAIN_DIR/bin"
           if [ ! -d "$BIN_DIR" ]; then
             BIN_DIR=$(find "$TOOLCHAIN_DIR" -type d -name bin | head -n1 || true)
@@ -144,7 +146,6 @@ jobs:
 
           cd "$KDIR"
 
-          # Choose .config from synoconfigs or provided path
           if [ -n "${{ inputs.syno_config_path }}" ]; then
             CFG_PATH="${{ inputs.syno_config_path }}"
             if [ -f "$CFG_PATH" ]; then
@@ -155,7 +156,6 @@ jobs:
               echo "Provided syno_config_path not found: $CFG_PATH" >&2; exit 1
             fi
           else
-            # Locate synoconfigs directory recursively
             SCONF_DIR=""
             for base in "$KDIR" /opt/syno/kernel; do
               if [ -z "$SCONF_DIR" ]; then
@@ -168,9 +168,7 @@ jobs:
             else
               echo "synoconfigs not found or ${ { inputs.syno_config } } missing." >&2
               echo "Searched under: $KDIR and /opt/syno/kernel" >&2
-              echo "Tip: Provide inputs.syno_config_path (e.g. path/to/synoconfigs/epyc7002) or ensure kernel source includes synoconfigs." >&2
-              # Print any candidates to help debugging
-              find /opt/syno/kernel -maxdepth 3 -type f -name "${{ inputs.syno_config }}" -printf 'candidate: %p\n' || true
+              find /opt/syno/kernel -maxdepth 4 -type f -name "${{ inputs.syno_config }}" -printf 'candidate: %p\n' || true
               exit 1
             fi
           fi
@@ -178,9 +176,22 @@ jobs:
           make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
           make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" modules_prepare
 
-          # Ensure Module.symvers available to avoid CRC mismatches
           if [ ! -f Module.symvers ]; then
-            make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" modules -j$(nproc)
+            echo "Building modules to produce Module.symvers (with WERROR=0)"
+            set +e
+            make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
+                 WERROR=0 HOSTCFLAGS="-Wno-error -Wno-error=use-after-free" \
+                 KCFLAGS="-Wno-error" \
+                 modules -j$(nproc)
+            status=$?
+            set -e
+            if [ $status -ne 0 ] && [ "${{ inputs.force_empty_symvers }}" = "true" ]; then
+              echo "Modules build failed; force_empty_symvers=true → creating empty Module.symvers"
+              : > Module.symvers
+            elif [ $status -ne 0 ]; then
+              echo "Modules build failed and force_empty_symvers is false" >&2
+              exit $status
+            fi
           fi
 
       - name: Build i915 (external module)
