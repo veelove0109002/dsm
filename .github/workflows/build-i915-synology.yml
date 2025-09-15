@@ -16,6 +16,11 @@ on:
         required: true
         default: epyc7002
         type: string
+      syno_config_path:
+        description: Optional explicit path to config file if synoconfigs not found (relative or absolute)
+        required: false
+        default: ""
+        type: string
       arch:
         description: Target ARCH (e.g. x86_64, armv7, aarch64)
         required: true
@@ -92,7 +97,7 @@ jobs:
           (tar -xf /opt/syno/kernel.tar -C /opt/syno/kernel 2>/dev/null) || \
           (xz -dc /opt/syno/kernel.tar | tar -x -C /opt/syno/kernel) || \
           (gzip -dc /opt/syno/kernel.tar | tar -x -C /opt/syno/kernel)
-          echo "Kernel contents:" && find /opt/syno/kernel -maxdepth 2 -type d | sed 's/^/  /'
+          echo "Kernel contents:" && find /opt/syno/kernel -maxdepth 3 -type d | sed 's/^/  /'
 
       - name: Detect toolchain and kernel directories
         id: detect
@@ -104,7 +109,11 @@ jobs:
           fi
           echo "TOOLCHAIN_DIR=$TOOLCHAIN_DIR" | tee -a $GITHUB_OUTPUT
 
-          KERNEL_DIR=$(find /opt/syno/kernel -type d -maxdepth 2 -mindepth 1 | sort | head -n1)
+          # Prefer a linux-* directory as kernel dir; otherwise first child
+          KERNEL_DIR=$(find /opt/syno/kernel -type d -name 'linux-*' -maxdepth 2 | sort | head -n1)
+          if [ -z "$KERNEL_DIR" ]; then
+            KERNEL_DIR=$(find /opt/syno/kernel -type d -maxdepth 2 -mindepth 1 | sort | head -n1)
+          fi
           if [ -z "$KERNEL_DIR" ]; then
             echo "No kernel directory detected" >&2; exit 1
           fi
@@ -113,7 +122,6 @@ jobs:
           # Detect cross prefix from toolchain bin/*-gcc
           BIN_DIR="$TOOLCHAIN_DIR/bin"
           if [ ! -d "$BIN_DIR" ]; then
-            # Some toolchains place bin deeper
             BIN_DIR=$(find "$TOOLCHAIN_DIR" -type d -name bin | head -n1 || true)
           fi
           if [ -z "${BIN_DIR:-}" ] || [ ! -d "$BIN_DIR" ]; then
@@ -135,13 +143,36 @@ jobs:
           KDIR="${{ steps.detect.outputs.KERNEL_DIR }}"
 
           cd "$KDIR"
-          if [ -f synoconfigs/${{ inputs.syno_config }} ]; then
-            cp synoconfigs/${{ inputs.syno_config }} .config
-          elif [ -d synoconfigs ]; then
-            echo "synoconfigs/${{ inputs.syno_config }} not found. Available:" && ls -1 synoconfigs || true
-            exit 1
+
+          # Choose .config from synoconfigs or provided path
+          if [ -n "${{ inputs.syno_config_path }}" ]; then
+            CFG_PATH="${{ inputs.syno_config_path }}"
+            if [ -f "$CFG_PATH" ]; then
+              cp "$CFG_PATH" .config
+            elif [ -f "$KDIR/$CFG_PATH" ]; then
+              cp "$KDIR/$CFG_PATH" .config
+            else
+              echo "Provided syno_config_path not found: $CFG_PATH" >&2; exit 1
+            fi
           else
-            echo "No synoconfigs directory found in kernel source" >&2; exit 1
+            # Locate synoconfigs directory recursively
+            SCONF_DIR=""
+            for base in "$KDIR" /opt/syno/kernel; do
+              if [ -z "$SCONF_DIR" ]; then
+                SCONF_DIR=$(find "$base" -type d -name synoconfigs | head -n1 || true)
+              fi
+            done
+            if [ -n "$SCONF_DIR" ] && [ -f "$SCONF_DIR/${{ inputs.syno_config }}" ]; then
+              echo "Using synoconfig: $SCONF_DIR/${{ inputs.syno_config }}"
+              cp "$SCONF_DIR/${{ inputs.syno_config }}" .config
+            else
+              echo "synoconfigs not found or ${ { inputs.syno_config } } missing." >&2
+              echo "Searched under: $KDIR and /opt/syno/kernel" >&2
+              echo "Tip: Provide inputs.syno_config_path (e.g. path/to/synoconfigs/epyc7002) or ensure kernel source includes synoconfigs." >&2
+              # Print any candidates to help debugging
+              find /opt/syno/kernel -maxdepth 3 -type f -name "${{ inputs.syno_config }}" -printf 'candidate: %p\n' || true
+              exit 1
+            fi
           fi
 
           make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
