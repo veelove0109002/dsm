@@ -26,10 +26,27 @@ on:
         required: false
         default: ""
         type: string
+      release_tag:
+        description: Optional release tag (default auto-generated)
+        required: false
+        default: ""
+        type: string
+      release_name:
+        description: Optional release name (default auto-generated)
+        required: false
+        default: ""
+        type: string
+      prerelease:
+        description: Mark release as prerelease
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       WORKSPACE: ${{ github.workspace }}
     steps:
@@ -155,7 +172,31 @@ jobs:
           find "$GITHUB_WORKSPACE" -type f -name '*.ko' -print -exec cp -v {} "$ART" \;
           echo "Collected:" && ls -l "$ART"
 
-      - name: Upload artifacts
+      - name: Compute release metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.release_tag }}"
+          NAME="${{ inputs.release_name }}"
+          if [ -z "$TAG" ]; then
+            TAG="i915-${{ inputs.syno_config }}-${{ inputs.arch }}-${{ github.run_number }}"
+          fi
+          if [ -z "$NAME" ]; then
+            NAME="i915 for Synology (${{ inputs.syno_config }}, ${{ inputs.arch }}) #${{ github.run_number }}"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "name=$NAME" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.name }}
+          draft: false
+          prerelease: ${{ inputs.prerelease }}
+          files: artifacts/*.ko
+
+      - name: Upload artifacts (backup)
         uses: actions/upload-artifact@v4
         with:
           name: synology-i915-${{ inputs.syno_config }}-${{ inputs.arch }}
