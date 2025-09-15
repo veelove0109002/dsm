@@ -143,6 +143,8 @@ jobs:
           export CROSS_COMPILE="${{ steps.detect.outputs.CROSS_COMPILE }}"
           export PATH="${{ steps.detect.outputs.TOOLCHAIN_DIR }}/bin:$PATH"
           KDIR="${{ steps.detect.outputs.KERNEL_DIR }}"
+          LOGDIR="$GITHUB_WORKSPACE/logs"
+          mkdir -p "$LOGDIR"
 
           cd "$KDIR"
 
@@ -173,23 +175,23 @@ jobs:
             fi
           fi
 
-          make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
-          make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" modules_prepare
+          make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" olddefconfig 2>&1 | tee -a "$LOGDIR/prepare.log"
+          make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" modules_prepare 2>&1 | tee -a "$LOGDIR/prepare.log"
 
           if [ ! -f Module.symvers ]; then
-            echo "Building modules to produce Module.symvers (with WERROR=0)"
+            echo "Building modules to produce Module.symvers (with WERROR=0)" | tee -a "$LOGDIR/prepare.log"
             set +e
             make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
                  WERROR=0 HOSTCFLAGS="-Wno-error -Wno-error=use-after-free" \
                  KCFLAGS="-Wno-error" \
-                 modules -j$(nproc)
-            status=$?
+                 modules -j$(nproc) 2>&1 | tee -a "$LOGDIR/prepare.log"
+            status=${PIPESTATUS[0]}
             set -e
             if [ $status -ne 0 ] && [ "${{ inputs.force_empty_symvers }}" = "true" ]; then
-              echo "Modules build failed; force_empty_symvers=true → creating empty Module.symvers"
+              echo "Modules build failed; force_empty_symvers=true → creating empty Module.symvers" | tee -a "$LOGDIR/prepare.log"
               : > Module.symvers
             elif [ $status -ne 0 ]; then
-              echo "Modules build failed and force_empty_symvers is false" >&2
+              echo "Modules build failed and force_empty_symvers is false" | tee -a "$LOGDIR/prepare.log"
               exit $status
             fi
           fi
@@ -201,10 +203,12 @@ jobs:
           export CROSS_COMPILE="${{ steps.detect.outputs.CROSS_COMPILE }}"
           export PATH="${{ steps.detect.outputs.TOOLCHAIN_DIR }}/bin:$PATH"
           KDIR="${{ steps.detect.outputs.KERNEL_DIR }}"
+          LOGDIR="$GITHUB_WORKSPACE/logs"
+          mkdir -p "$LOGDIR"
 
           cd "$GITHUB_WORKSPACE"
           echo "Building with KDIR=$KDIR"
-          make -C "$KDIR" M="$GITHUB_WORKSPACE" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" modules -j$(nproc) ${{ inputs.extra_make_args }}
+          make -C "$KDIR" M="$GITHUB_WORKSPACE" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" modules -j$(nproc) ${{ inputs.extra_make_args }} 2>&1 | tee -a "$LOGDIR/module_build.log"
 
       - name: Collect artifacts (.ko files)
         run: |
@@ -245,13 +249,12 @@ jobs:
           path: artifacts/*.ko
           if-no-files-found: error
 
-      - name: Upload build logs (optional)
+      - name: Upload build logs (on failure)
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
           path: |
-            **/build.log
-            **/dmesg.log
+            logs/**
             artifacts/**
-          if-no-files-found: warn
+          if-no-files-found: ignore
