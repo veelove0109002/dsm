@@ -92,7 +92,7 @@ jobs:
           (tar -xf /opt/syno/toolchain.tar -C /opt/syno/toolchain 2>/dev/null) || \
           (xz -dc /opt/syno/toolchain.tar | tar -x -C /opt/syno/toolchain) || \
           (gzip -dc /opt/syno/toolchain.tar | tar -x -C /opt/syno/toolchain)
-          echo "Toolchain contents:" && find /opt/syno/toolchain -maxdepth 3 -type d | sed 's/^/  /'
+          echo "Toolchain contents:" && find /opt/syno/toolchain -maxdepth 4 -type d | sed 's/^/  /'
 
       - name: Extract kernel source
         run: |
@@ -101,7 +101,7 @@ jobs:
           (tar -xf /opt/syno/kernel.tar -C /opt/syno/kernel 2>/dev/null) || \
           (xz -dc /opt/syno/kernel.tar | tar -x -C /opt/syno/kernel) || \
           (gzip -dc /opt/syno/kernel.tar | tar -x -C /opt/syno/kernel)
-          echo "Kernel contents:" && find /opt/syno/kernel -maxdepth 3 -type d | sed 's/^/  /'
+          echo "Kernel contents:" && find /opt/syno/kernel -maxdepth 4 -type d | sed 's/^/  /'
 
       - name: Robustly detect toolchain and kernel directories
         id: detect
@@ -109,52 +109,40 @@ jobs:
           set -euo pipefail
           echo "Scanning for toolchain and kernel..."
 
-          # Candidates anywhere under our roots
-          ROOTS=(/opt/syno/toolchain /opt/syno/kernel)
-
-          # Find toolchain dir by presence of bin/*-gcc
-          TOOLCHAIN_DIR=""
-          for root in "${ROOTS[@]}"; do
-            cand=$(find "$root" -maxdepth 3 -type d -name bin -exec sh -c 'ls -1 {}/*-gcc >/dev/null 2>&1 && dirname {}' \; | head -n1 || true)
-            if [ -n "$cand" ]; then
-              TOOLCHAIN_DIR="$cand"
-              # toolchain dir is parent of bin
-              TOOLCHAIN_DIR=$(dirname "$TOOLCHAIN_DIR")
-              break
-            fi
-          done
-          if [ -z "$TOOLCHAIN_DIR" ]; then
-            echo "Failed to detect toolchain dir with bin/*-gcc under $ROOTS" >&2; exit 1
+          # First, locate any cross gcc under both roots
+          GCC_PATH=$(find /opt/syno/toolchain /opt/syno/kernel -type f -name '*-gcc' 2>/dev/null | head -n1 || true)
+          if [ -z "${GCC_PATH:-}" ]; then
+            echo "Could not find any *-gcc under /opt/syno/toolchain or /opt/syno/kernel" >&2
+            echo "Please check toolchain_url is correct (should be epyc7002 x86_64 toolchain)." >&2
+            exit 1
           fi
+          BIN_DIR=$(dirname "$GCC_PATH")
+          TOOLCHAIN_DIR=$(dirname "$BIN_DIR")
           echo "TOOLCHAIN_DIR=$TOOLCHAIN_DIR" | tee -a $GITHUB_OUTPUT
 
-          # Find kernel dir by presence of arch/ and top-level Makefile
+          # Locate kernel dir: prefer linux-* with arch/ and Makefile
           KERNEL_DIR=""
-          for root in "${ROOTS[@]}"; do
-            cand=$(find "$root" -maxdepth 3 -type d -name 'linux-*' | head -n1 || true)
-            if [ -z "$cand" ]; then
-              cand=$(find "$root" -maxdepth 3 -type d -exec test -f {}/Makefile \; -exec test -d {}/arch \; -print | head -n1 || true)
-            fi
-            if [ -n "$cand" ]; then
-              KERNEL_DIR="$cand"; break
+          for dir in $(find /opt/syno/kernel /opt/syno/toolchain -maxdepth 4 -type d -name 'linux-*' || true); do
+            if [ -f "$dir/Makefile" ] && [ -d "$dir/arch" ]; then
+              KERNEL_DIR="$dir"; break
             fi
           done
           if [ -z "$KERNEL_DIR" ]; then
-            echo "Failed to detect kernel dir with arch/ and Makefile under $ROOTS" >&2; exit 1
+            # Fallback: generic directory with arch/ and Makefile
+            KERNEL_DIR=$(find /opt/syno/kernel /opt/syno/toolchain -maxdepth 4 -type d -exec test -f {}/Makefile \; -exec test -d {}/arch \; -print | head -n1 || true)
+          fi
+          if [ -z "$KERNEL_DIR" ]; then
+            echo "Failed to detect kernel dir (need a dir with Makefile and arch/)" >&2; exit 1
           fi
           echo "KERNEL_DIR=$KERNEL_DIR" | tee -a $GITHUB_OUTPUT
 
-          # Derive CROSS_COMPILE prefix
-          BIN_DIR="$TOOLCHAIN_DIR/bin"
-          CC_PATH=$(ls "$BIN_DIR"/*-gcc 2>/dev/null | head -n1 || true)
-          if [ -z "${CC_PATH:-}" ]; then
-            echo "Could not find *-gcc in $BIN_DIR" >&2; exit 1
-          fi
-          CROSS_COMPILE=$(basename "$CC_PATH" | sed 's/-gcc$//')-
+          CROSS_COMPILE=$(basename "$GCC_PATH" | sed 's/-gcc$//')-
           echo "CROSS_COMPILE=$CROSS_COMPILE" | tee -a $GITHUB_OUTPUT
 
           echo "Summary:"
           echo "  TOOLCHAIN_DIR=$TOOLCHAIN_DIR"
+          echo "  BIN_DIR=$BIN_DIR"
+          echo "  GCC_PATH=$GCC_PATH"
           echo "  KERNEL_DIR=$KERNEL_DIR"
           echo "  CROSS_COMPILE=$CROSS_COMPILE"
 
@@ -193,7 +181,7 @@ jobs:
           # Olddefconfig in KDIR
           make -C "$KDIR" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" $MAKEFLAGS_COMMON olddefconfig 2>&1 | tee -a "$LOGDIR/prepare.log"
 
-          # External modules_prepare to avoid descending into tools/objtool
+          # External modules_prepare (avoid objtool path)
           make -C "$KDIR" M="$GITHUB_WORKSPACE" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" $MAKEFLAGS_COMMON modules_prepare 2>&1 | tee -a "$LOGDIR/prepare.log"
 
           if [ ! -f "$KDIR/Module.symvers" ] && [ ! -f Module.symvers ]; then
