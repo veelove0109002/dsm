@@ -175,14 +175,15 @@ jobs:
             fi
           fi
 
-          make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" olddefconfig 2>&1 | tee -a "$LOGDIR/prepare.log"
-          make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" modules_prepare 2>&1 | tee -a "$LOGDIR/prepare.log"
+          MAKEFLAGS_COMMON="NO_WERROR=1 HOSTCFLAGS='-Wno-error -Wno-error=use-after-free'"
+
+          eval make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" $MAKEFLAGS_COMMON olddefconfig 2>&1 | tee -a "$LOGDIR/prepare.log"
+          eval make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" $MAKEFLAGS_COMMON modules_prepare 2>&1 | tee -a "$LOGDIR/prepare.log"
 
           if [ ! -f Module.symvers ]; then
-            echo "Building modules to produce Module.symvers (with WERROR=0)" | tee -a "$LOGDIR/prepare.log"
+            echo "Building modules to produce Module.symvers (with WERROR disabled)" | tee -a "$LOGDIR/prepare.log"
             set +e
-            make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
-                 WERROR=0 HOSTCFLAGS="-Wno-error -Wno-error=use-after-free" \
+            eval make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" $MAKEFLAGS_COMMON \
                  KCFLAGS="-Wno-error" \
                  modules -j$(nproc) 2>&1 | tee -a "$LOGDIR/prepare.log"
             status=${PIPESTATUS[0]}
