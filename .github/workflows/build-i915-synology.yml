@@ -32,9 +32,9 @@ on:
         default: ""
         type: string
       force_empty_symvers:
-        description: Fallback to empty Module.symvers if modules build fails
+        description: Use empty Module.symvers (skip kernel modules build)
         required: false
-        default: false
+        default: true
         type: boolean
       release_tag:
         description: Optional release tag (default auto-generated)
@@ -181,19 +181,21 @@ jobs:
           eval make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" $MAKEFLAGS_COMMON modules_prepare 2>&1 | tee -a "$LOGDIR/prepare.log"
 
           if [ ! -f Module.symvers ]; then
-            echo "Building modules to produce Module.symvers (with WERROR disabled)" | tee -a "$LOGDIR/prepare.log"
-            set +e
-            eval make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" $MAKEFLAGS_COMMON \
-                 KCFLAGS="-Wno-error" \
-                 modules -j$(nproc) 2>&1 | tee -a "$LOGDIR/prepare.log"
-            status=${PIPESTATUS[0]}
-            set -e
-            if [ $status -ne 0 ] && [ "${{ inputs.force_empty_symvers }}" = "true" ]; then
-              echo "Modules build failed; force_empty_symvers=true → creating empty Module.symvers" | tee -a "$LOGDIR/prepare.log"
+            if [ "${{ inputs.force_empty_symvers }}" = "true" ]; then
+              echo "force_empty_symvers=true → creating empty Module.symvers and skipping kernel modules build" | tee -a "$LOGDIR/prepare.log"
               : > Module.symvers
-            elif [ $status -ne 0 ]; then
-              echo "Modules build failed and force_empty_symvers is false" | tee -a "$LOGDIR/prepare.log"
-              exit $status
+            else
+              echo "Building modules to produce Module.symvers (with WERROR disabled)" | tee -a "$LOGDIR/prepare.log"
+              set +e
+              eval make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" $MAKEFLAGS_COMMON \
+                   KCFLAGS="-Wno-error" \
+                   modules -j$(nproc) 2>&1 | tee -a "$LOGDIR/prepare.log"
+              status=${PIPESTATUS[0]}
+              set -e
+              if [ $status -ne 0 ]; then
+                echo "Modules build failed; consider setting force_empty_symvers=true" | tee -a "$LOGDIR/prepare.log"
+                exit $status
+              fi
             fi
           fi
 
