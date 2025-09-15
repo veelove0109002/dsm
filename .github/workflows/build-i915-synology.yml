@@ -1,0 +1,174 @@
+name: Build i915 for Synology (SR-IOV)
+
+on:
+  workflow_dispatch:
+    inputs:
+      toolchain_url:
+        description: URL to Synology toolchain tarball (matching DSM arch)
+        required: true
+        type: string
+      kernel_url:
+        description: URL to Synology kernel source tarball (matching DSM build, e.g. 5.10.55)
+        required: true
+        type: string
+      syno_config:
+        description: synoconfigs/<platform> to use (e.g. epyc7002, x64, apollolake, geminilake, denverton)
+        required: true
+        default: epyc7002
+        type: string
+      arch:
+        description: Target ARCH (e.g. x86_64, armv7, aarch64)
+        required: true
+        default: x86_64
+        type: string
+      extra_make_args:
+        description: Extra MAKE args (optional, e.g. V=1)
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      WORKSPACE: ${{ github.workspace }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential bison flex bc libelf-dev rsync cpio python3 git file pkg-config \
+            xz-utils tar curl ca-certificates
+
+      - name: Create directories
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          mkdir -p /opt/syno/toolchain /opt/syno/kernel
+
+      - name: Download toolchain
+        run: |
+          echo "Downloading: ${{ inputs.toolchain_url }}"
+          curl -fsSL --retry 5 --retry-delay 3 -o /opt/syno/toolchain.tar "${{ inputs.toolchain_url }}"
+
+      - name: Download kernel source
+        run: |
+          echo "Downloading: ${{ inputs.kernel_url }}"
+          curl -fsSL --retry 5 --retry-delay 3 -o /opt/syno/kernel.tar "${{ inputs.kernel_url }}"
+
+      - name: Extract toolchain
+        run: |
+          set -euo pipefail
+          file /opt/syno/toolchain.tar
+          # Try common formats
+          (tar -xf /opt/syno/toolchain.tar -C /opt/syno/toolchain 2>/dev/null) || \
+          (xz -dc /opt/syno/toolchain.tar | tar -x -C /opt/syno/toolchain) || \
+          (gzip -dc /opt/syno/toolchain.tar | tar -x -C /opt/syno/toolchain)
+          echo "Toolchain contents:" && find /opt/syno/toolchain -maxdepth 3 -type d | sed 's/^/  /'
+
+      - name: Extract kernel source
+        run: |
+          set -euo pipefail
+          file /opt/syno/kernel.tar
+          (tar -xf /opt/syno/kernel.tar -C /opt/syno/kernel 2>/dev/null) || \
+          (xz -dc /opt/syno/kernel.tar | tar -x -C /opt/syno/kernel) || \
+          (gzip -dc /opt/syno/kernel.tar | tar -x -C /opt/syno/kernel)
+          echo "Kernel contents:" && find /opt/syno/kernel -maxdepth 2 -type d | sed 's/^/  /'
+
+      - name: Detect toolchain and kernel directories
+        id: detect
+        run: |
+          set -euo pipefail
+          TOOLCHAIN_DIR=$(find /opt/syno/toolchain -type d -maxdepth 2 -mindepth 1 | sort | head -n1)
+          if [ -z "$TOOLCHAIN_DIR" ]; then
+            echo "No toolchain directory detected" >&2; exit 1
+          fi
+          echo "TOOLCHAIN_DIR=$TOOLCHAIN_DIR" | tee -a $GITHUB_OUTPUT
+
+          KERNEL_DIR=$(find /opt/syno/kernel -type d -maxdepth 2 -mindepth 1 | sort | head -n1)
+          if [ -z "$KERNEL_DIR" ]; then
+            echo "No kernel directory detected" >&2; exit 1
+          fi
+          echo "KERNEL_DIR=$KERNEL_DIR" | tee -a $GITHUB_OUTPUT
+
+          # Detect cross prefix from toolchain bin/*-gcc
+          BIN_DIR="$TOOLCHAIN_DIR/bin"
+          if [ ! -d "$BIN_DIR" ]; then
+            # Some toolchains place bin deeper
+            BIN_DIR=$(find "$TOOLCHAIN_DIR" -type d -name bin | head -n1 || true)
+          fi
+          if [ -z "${BIN_DIR:-}" ] || [ ! -d "$BIN_DIR" ]; then
+            echo "Could not find toolchain bin/ directory" >&2; exit 1
+          fi
+          CC_PATH=$(ls "$BIN_DIR"/*-gcc 2>/dev/null | head -n1 || true)
+          if [ -z "${CC_PATH:-}" ]; then
+            echo "Could not find *-gcc in toolchain" >&2; exit 1
+          fi
+          CROSS_COMPILE=$(basename "$CC_PATH" | sed 's/-gcc$//')-
+          echo "CROSS_COMPILE=$CROSS_COMPILE" | tee -a $GITHUB_OUTPUT
+
+      - name: Prepare kernel tree (modules_prepare and Module.symvers)
+        run: |
+          set -euo pipefail
+          export ARCH="${{ inputs.arch }}"
+          export CROSS_COMPILE="${{ steps.detect.outputs.CROSS_COMPILE }}"
+          export PATH="${{ steps.detect.outputs.TOOLCHAIN_DIR }}/bin:$PATH"
+          KDIR="${{ steps.detect.outputs.KERNEL_DIR }}"
+
+          cd "$KDIR"
+          if [ -f synoconfigs/${{ inputs.syno_config }} ]; then
+            cp synoconfigs/${{ inputs.syno_config }} .config
+          elif [ -d synoconfigs ]; then
+            echo "synoconfigs/${{ inputs.syno_config }} not found. Available:" && ls -1 synoconfigs || true
+            exit 1
+          else
+            echo "No synoconfigs directory found in kernel source" >&2; exit 1
+          fi
+
+          make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
+          make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" modules_prepare
+
+          # Ensure Module.symvers available to avoid CRC mismatches
+          if [ ! -f Module.symvers ]; then
+            make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" modules -j$(nproc)
+          fi
+
+      - name: Build i915 (external module)
+        run: |
+          set -euo pipefail
+          export ARCH="${{ inputs.arch }}"
+          export CROSS_COMPILE="${{ steps.detect.outputs.CROSS_COMPILE }}"
+          export PATH="${{ steps.detect.outputs.TOOLCHAIN_DIR }}/bin:$PATH"
+          KDIR="${{ steps.detect.outputs.KERNEL_DIR }}"
+
+          cd "$GITHUB_WORKSPACE"
+          echo "Building with KDIR=$KDIR"
+          make -C "$KDIR" M="$GITHUB_WORKSPACE" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" modules -j$(nproc) ${{ inputs.extra_make_args }}
+
+      - name: Collect artifacts (.ko files)
+        run: |
+          set -euo pipefail
+          ART="$GITHUB_WORKSPACE/artifacts"
+          mkdir -p "$ART"
+          find "$GITHUB_WORKSPACE" -type f -name '*.ko' -print -exec cp -v {} "$ART" \;
+          echo "Collected:" && ls -l "$ART"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: synology-i915-${{ inputs.syno_config }}-${{ inputs.arch }}
+          path: artifacts/*.ko
+          if-no-files-found: error
+
+      - name: Upload build logs (optional)
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            **/build.log
+            **/dmesg.log
+            artifacts/**
+          if-no-files-found: warn
