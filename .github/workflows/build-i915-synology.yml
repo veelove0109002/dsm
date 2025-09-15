@@ -103,38 +103,60 @@ jobs:
           (gzip -dc /opt/syno/kernel.tar | tar -x -C /opt/syno/kernel)
           echo "Kernel contents:" && find /opt/syno/kernel -maxdepth 3 -type d | sed 's/^/  /'
 
-      - name: Detect toolchain and kernel directories
+      - name: Robustly detect toolchain and kernel directories
         id: detect
         run: |
           set -euo pipefail
-          TOOLCHAIN_DIR=$(find /opt/syno/toolchain -type d -maxdepth 2 -mindepth 1 | sort | head -n1)
+          echo "Scanning for toolchain and kernel..."
+
+          # Candidates anywhere under our roots
+          ROOTS=(/opt/syno/toolchain /opt/syno/kernel)
+
+          # Find toolchain dir by presence of bin/*-gcc
+          TOOLCHAIN_DIR=""
+          for root in "${ROOTS[@]}"; do
+            cand=$(find "$root" -maxdepth 3 -type d -name bin -exec sh -c 'ls -1 {}/*-gcc >/dev/null 2>&1 && dirname {}' \; | head -n1 || true)
+            if [ -n "$cand" ]; then
+              TOOLCHAIN_DIR="$cand"
+              # toolchain dir is parent of bin
+              TOOLCHAIN_DIR=$(dirname "$TOOLCHAIN_DIR")
+              break
+            fi
+          done
           if [ -z "$TOOLCHAIN_DIR" ]; then
-            echo "No toolchain directory detected" >&2; exit 1
+            echo "Failed to detect toolchain dir with bin/*-gcc under $ROOTS" >&2; exit 1
           fi
           echo "TOOLCHAIN_DIR=$TOOLCHAIN_DIR" | tee -a $GITHUB_OUTPUT
 
-          KERNEL_DIR=$(find /opt/syno/kernel -type d -name 'linux-*' -maxdepth 2 | sort | head -n1)
+          # Find kernel dir by presence of arch/ and top-level Makefile
+          KERNEL_DIR=""
+          for root in "${ROOTS[@]}"; do
+            cand=$(find "$root" -maxdepth 3 -type d -name 'linux-*' | head -n1 || true)
+            if [ -z "$cand" ]; then
+              cand=$(find "$root" -maxdepth 3 -type d -exec test -f {}/Makefile \; -exec test -d {}/arch \; -print | head -n1 || true)
+            fi
+            if [ -n "$cand" ]; then
+              KERNEL_DIR="$cand"; break
+            fi
+          done
           if [ -z "$KERNEL_DIR" ]; then
-            KERNEL_DIR=$(find /opt/syno/kernel -type d -maxdepth 2 -mindepth 1 | sort | head -n1)
-          fi
-          if [ -z "$KERNEL_DIR" ]; then
-            echo "No kernel directory detected" >&2; exit 1
+            echo "Failed to detect kernel dir with arch/ and Makefile under $ROOTS" >&2; exit 1
           fi
           echo "KERNEL_DIR=$KERNEL_DIR" | tee -a $GITHUB_OUTPUT
 
+          # Derive CROSS_COMPILE prefix
           BIN_DIR="$TOOLCHAIN_DIR/bin"
-          if [ ! -d "$BIN_DIR" ]; then
-            BIN_DIR=$(find "$TOOLCHAIN_DIR" -type d -name bin | head -n1 || true)
-          fi
-          if [ -z "${BIN_DIR:-}" ] || [ ! -d "$BIN_DIR" ]; then
-            echo "Could not find toolchain bin/ directory" >&2; exit 1
-          fi
           CC_PATH=$(ls "$BIN_DIR"/*-gcc 2>/dev/null | head -n1 || true)
           if [ -z "${CC_PATH:-}" ]; then
-            echo "Could not find *-gcc in toolchain" >&2; exit 1
+            echo "Could not find *-gcc in $BIN_DIR" >&2; exit 1
           fi
           CROSS_COMPILE=$(basename "$CC_PATH" | sed 's/-gcc$//')-
           echo "CROSS_COMPILE=$CROSS_COMPILE" | tee -a $GITHUB_OUTPUT
+
+          echo "Summary:"
+          echo "  TOOLCHAIN_DIR=$TOOLCHAIN_DIR"
+          echo "  KERNEL_DIR=$KERNEL_DIR"
+          echo "  CROSS_COMPILE=$CROSS_COMPILE"
 
       - name: Prepare kernel tree (modules_prepare and Module.symvers)
         run: |
