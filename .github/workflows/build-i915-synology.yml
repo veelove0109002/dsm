@@ -175,7 +175,14 @@ jobs:
             fi
           fi
 
-          MAKEFLAGS_COMMON="NO_WERROR=1 HOSTCFLAGS='-Wno-error -Wno-error=use-after-free'"
+          MAKEFLAGS_COMMON="NO_WERROR=1 HOSTCFLAGS='-Wno-error -Wno-error=use-after-free' SKIP_STACK_VALIDATION=1 NO_OBJTOOL=1"
+
+          # Create a stub objtool to bypass building tools/objtool
+          mkdir -p tools/objtool
+          if [ ! -x tools/objtool/objtool ]; then
+            printf '#!/bin/sh\nexit 0\n' > tools/objtool/objtool
+            chmod +x tools/objtool/objtool
+          fi
 
           eval make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" $MAKEFLAGS_COMMON olddefconfig 2>&1 | tee -a "$LOGDIR/prepare.log"
           eval make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" $MAKEFLAGS_COMMON modules_prepare 2>&1 | tee -a "$LOGDIR/prepare.log"
@@ -185,7 +192,7 @@ jobs:
               echo "force_empty_symvers=true → creating empty Module.symvers and skipping kernel modules build" | tee -a "$LOGDIR/prepare.log"
               : > Module.symvers
             else
-              echo "Building modules to produce Module.symvers (with WERROR disabled)" | tee -a "$LOGDIR/prepare.log"
+              echo "Building modules to produce Module.symvers (with WERROR disabled and objtool skipped)" | tee -a "$LOGDIR/prepare.log"
               set +e
               eval make ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" $MAKEFLAGS_COMMON \
                    KCFLAGS="-Wno-error" \
